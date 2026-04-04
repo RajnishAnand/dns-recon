@@ -29,19 +29,36 @@ def head(msg): print(f"\n{BOLD}{'─'*50}\n   {msg}\n{'─'*50}{RESET}")
 def query_a_record(domain):
     head("[A] Records")
 
-    resolver = dns.resolver.Resolver()
-    resolver.timeout = 5
-    resolver.lifetime = 5
+    # the recursive resolver instance
+    resolver = dns.resolver.Resolver() 
+    resolver.timeout = 5 # single query timeout before retrying
+    resolver.lifetime = 5 # tota time before giving up
 
-    try: 
-        answers = resolver.resolve(domain, 'A')
-        for record in answers: ok(record.to_text())
-    except dns.resolver.NXDOMAIN:
-        err(f"{domain} does not exist.")
-    except dns.resolver.NoAnswer:
-        warn(f"No A records found for {domain}.")
-    except dns.exception.DNSException as e:        
-        err(f"DNS query failed: {e}")
+    record_types = ['A', 'AAAA', 'MX', 'TXT', 'NS', 'CNAME', 'SOA']
+    results = {}
+
+    for rtype in record_types:
+        try: 
+            answers = resolver.resolve(domain, rtype)
+            results[rtype] = []
+
+            for record in answers: 
+                value = record.to_text()
+                results[rtype].append(value)
+                ok(f"{BOLD}{rtype:<6} record: {value}")
+            
+        # NXDOMAIN: Non EXistent Domain
+        except dns.resolver.NXDOMAIN:
+            err(f"{domain} does not exist.")
+            return {}
+        # No Answer: Domain Exists but no A recrd, might have MX and TXT record, (eg mail, no website)
+        except dns.resolver.NoAnswer:
+            warn(f"No A records found for {domain}.")
+        # Timeout, network error, malformed response, etc
+        except dns.exception.DNSException as e:        
+            err(f"DNS query failed: {e}")
+
+
 
 
 # ---- Main Function --------------------
