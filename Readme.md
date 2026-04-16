@@ -9,9 +9,11 @@
 
 ---
 
-[![asciinema](https://asciinema.org/a/JeTIObdLVE8mUmXy)](https://github.com/rajnishanand/dns-recon)
+[![asciicast](https://asciinema.org/a/JeTIObdLVE8mUmXy.svg)](https://asciinema.org/a/JeTIObdLVE8mUmXy)
 
 ---
+
+
 https://github.com/rajnishanand/dns-recon
 ## What It Does
 
