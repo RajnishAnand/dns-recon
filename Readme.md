@@ -13,8 +13,6 @@
 
 ---
 
-
-https://github.com/rajnishanand/dns-recon
 ## What It Does
 
 Given a target domain, `recon.py` maps its full DNS attack surface using public data sources and direct DNS queries:
