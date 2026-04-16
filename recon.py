@@ -7,7 +7,29 @@ import dns.resolver
 import dns.zone
 import dns.exception
 import dns.rdatatype
+import json
+import time
 
+
+
+
+TAKEOVER_FINGERPRINTS = [
+    ("github.io",         "There isn't a GitHub Pages site here",          "GitHub Pages"),
+    ("herokuapp.com",     "No such app",                                    "Heroku"),
+    ("s3.amazonaws.com",  "NoSuchBucket",                                   "AWS S3"),
+    ("netlify.app",       "Not Found - Request ID",                         "Netlify"),
+    ("netlify.com",       "Not Found - Request ID",                         "Netlify"),
+    ("azurewebsites.net", "404 Web Site not found",                         "Azure"),
+    ("cloudapp.net",      "404 Web Site not found",                         "Azure"),
+    ("fastly.net",        "Fastly error: unknown domain",                   "Fastly"),
+    ("ghost.io",          "The thing you were looking for is no longer here","Ghost"),
+    ("myshopify.com",     "Sorry, this shop is currently unavailable",      "Shopify"),
+    ("surge.sh",          "project not found",                              "Surge"),
+    ("webflow.io",        "The page you are looking for doesn't exist",     "Webflow"),
+    ("readthedocs.io",    "Unknown project code",                           "ReadTheDocs"),
+    ("zendesk.com",       "Help Center Closed",                             "Zendesk"),
+    ("freshdesk.com",     "There is no helpdesk here",                      "Freshdesk"),
+]
 
 # ---- Colors --------------------
 RESET = "\033[0m"
@@ -128,7 +150,7 @@ def crtsh_subdomains(domain):
         url = f"https://crt.sh/?q=%.{domain}&output=json"
         response = requests.get(
             url,
-            timeout=30,
+            timeout=60,
             headers={"User-Agent": "recon.py/1.0"}
         )
         response.raise_for_status()
@@ -244,6 +266,69 @@ def attempt_axfr(domain, nameservers):
     info("Note: a successful AXFR would mean the target is misconfigured") 
     return result
 
+def cname_resolves(cname):
+    try:
+        socket.gethostbyname(cname)
+        return True
+    except socket.gaierror:
+        return False
+
+def check_takeover(subdomain, cname):
+    for cname_pat, body_pat, service in TAKEOVER_FINGERPRINTS:
+        if cname_pat not in cname:
+            continue
+
+        # CNAME matches a known platform - now check if it resolves
+        if not cname_resolves(cname):
+            return f"{service} (CNAME does not resolve — dangling)"
+
+        # it resolves — probe HTTP for the error fingerprint 
+        try:
+            r = requests.get(
+                f"https://{subdomain}",
+                timeout=5,
+                allow_redirects=True,
+                headers={"User-Agent": "recon.py/1.0"}
+            )
+            if body_pat.lower() in r.text.lower():
+                return f"{service} (error page fingerprint matched)"
+        except requests.exceptions.RequestException:
+            return f"{service} (CNAME matches, HTTP unreachable)"
+
+    return None
+
+def detect_takeovers(subdomains):
+    head("Subdomain Takeover Detection")
+
+    candidates = []
+    cname_subs = [s for s in subdomains if s.get("cname")]
+
+    if not cname_subs:
+        info("No CNAME records found among discovered subdomains")
+        return candidates
+
+    info(f"checking {len(cname_subs)} CNAME record(s)...")
+
+    for sub in cname_subs: 
+        result = check_takeover(sub["name"], sub["cname"])
+        if result:
+            sub["takeover"] = result
+            candidates.append(sub)
+
+            print(f"\n {RED}{BOLD}[TAKEOVER CANDIDATE]{RESET}")
+            print(f"    {RED}  Subdomain : {sub['name']}{RESET}")
+            print(f"    {RED}  CNAME     : {sub['cname']}{RESET}")
+            print(f"    {RED}  Service   : {result}{RESET}")
+        else:
+            info(f"{sub['name']} → {sub['cname']} (no fingerprint match)")
+
+    if not candidates:
+        ok("No takeover candidates found")
+
+    return candidates
+
+
+
 
 # ---------------  Argument Parser function -------------------
 def parser_args():
@@ -279,22 +364,107 @@ def parser_args():
     )
     return parser.parse_args()
 
+# summary printer
+def print_summary(domain, records, brute_results, axfr_results, takeover_candidates):
+    head("Summary")
+
+    total_subs = len(brute_results)
+    resolved = len([s for s in brute_results if s.get("ips")])
+    takeovers = len(takeover_candidates)
+
+    print(f"   {BOLD}Target:{RESET}             {domain}")
+    print(f"   {BOLD}A records:{RESET}          {len(records.get('A', []))}")
+    print(f"   {BOLD}MX records:{RESET}         {len(records.get('MX', []))}")
+    print(f"   {BOLD}NS records:{RESET}         {len(records.get('NS', []))}")
+    print(f"   {BOLD}Subdomains found{RESET}    {total_subs} ({resolved} resolved)")
+    print(f"   {BOLD}AXFR success{RESET}        {axfr_results.get('success', False)}")
+
+    if takeovers:
+        print(f"\n  {RED}{BOLD}⚠  TAKEOVER CANDIDATES: {takeovers}{RESET}")
+        for s in takeover_candidates:
+            print(f"  {RED}   • {s['name']} → {s['cname']}{RESET}")
+            print(f"  {RED}     {s['takeover']}{RESET}")
+    else:
+        print(f"\n  {GREEN}  No takeover candidates found{RESET}")
+    print()
+
+
+def write_json(domain, records, brute_results, axfr_results, takeover_candidates, path):
+    report = {
+        "target":    domain,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "dns_records": records,
+        "subdomains": brute_results,
+        "axfr": axfr_result,
+        "takeover_candidates": takeover_candidates,
+    }
+
+    with open(path, "w") as f:
+        json.dump(report, f, indent=2)
+
+    ok(f"JSON report written to {path}")
+
 
 # ---- Main Function --------------------
 def main():
     banner()
     args = parser_args()
+    domain = args.domain.strip().lower()
     info(f"Target: {BOLD}{args.domain}{RESET}")
 
+    # 1. DNS records 
     records = enumerate_dns_records(args.domain)
+
+    # 2. Certificate transparency
     ct_subdomains = crtsh_subdomains(args.domain)
 
+    # 3. Wordlist brute-force
     wordlist = load_wordlist(args.wordlist)
     brute_results = brute_force_subdomains(args.domain, wordlist, args.threads)
 
+    # 4. Merge CT-only subdomains into results
+    brute_names = {s["name"] for s in brute_results}
+    resolver = dns.resolver.Resolver()
+    resolver.timeout = 3
+    resolver.lifetime = 3
+
+    for fqdn in sorted(ct_subdomains):
+        if fqdn in brute_names or fqdn == domain:
+            continue
+        cname_target = None
+        try:
+            try:
+                ca = resolver.resolve(fqdn, "CNAME")
+                cname_target = ca[0].to_text().rstrip(".")
+            except Exception:
+                pass
+
+            a_ans = resolver.resolve(fqdn, "A")
+            ips = [r.to_text() for r in a_ans]
+            brute_results.append({"name": fqdn, "ips": ips, "cname": cname_target, "source": "crt.sh"})
+            ok(f"{fqdn<<45} {', ',join(ips)}    {GREY}(crt.sh){RESET}")
+        except Exception:
+            brute_results.append({"name": fqdn, "ips": [], "cname": None, "source": "crtsh"})
+            warn(f"{fqdn:<45} (unresolvable — historical CT entry)")
+
+
+    # 5. AXFR
+    axfr_result = {"attempted": [], "success": False, "records": []}
     if not args.no_axfr:
         ns_list = records.get("NS", [])
         axfr_result = attempt_axfr(args.domain, ns_list)
+
+    # 6. Takeover detection
+    takeover_candidates = detect_takeovers(brute_results)
+
+    # 7. Summary
+    print_summary(args.domain, records, brute_results, axfr_result, takeover_candidates)
+
+    # 8. JSON output
+    if args.json:
+        out_path = f"{domain.replace('.', '_')}_recon.json"
+        write_json(domain, records, brute_results, axfr_result, takeover_candidates, out_path)
+
 
 
 #------------------------------------------------------
