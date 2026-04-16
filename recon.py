@@ -395,7 +395,7 @@ def write_json(domain, records, brute_results, axfr_results, takeover_candidates
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "dns_records": records,
         "subdomains": brute_results,
-        "axfr": axfr_result,
+        "axfr": axfr_results,
         "takeover_candidates": takeover_candidates,
     }
 
